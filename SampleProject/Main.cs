@@ -23,6 +23,7 @@ namespace SampleProject {
         // Could just use Tuple, but creating an immutable FileData class is more OOP convention
         private static readonly Dictionary<string, FileData> WebFileMap = new Dictionary<string, FileData>();
 
+        private bool ShuttingDown = false;
         private int Port;
         private TcpListener Listener;
         private string RootFilePath;
@@ -84,7 +85,7 @@ namespace SampleProject {
             // Start the listener
             Listener.Start();
             // Start the root handler thread
-            new Task(ConnectionHandler).Start();
+            new Task(RootConnectionHandler).Start();
 
             Console.WriteLine();
             Console.WriteLine("The server has been started on port {0}", Port);
@@ -92,77 +93,105 @@ namespace SampleProject {
             Console.WriteLine("Press enter to end the server");
             Console.ReadLine();
 
+            // Global shutdown variable
+            ShuttingDown = true;
             Listener.Stop();
 
             return 0;
         }
 
-        private void ConnectionHandler() {
+        private void RootConnectionHandler() {
             int numThreads = 0;
-            for (; ; ) {
-                Socket sock = Listener.AcceptSocket();
-                // Sleep until a thread is freed up if at max capacity
-                for (; numThreads == MaxThreads; Thread.Sleep(ConnectionPollingInterval)) ;
-                // Spawn a thread to handle the connection so that clients can be handled in parallel
-                numThreads++;
-                new Task(delegate() {
-                    try {
-                        // Using block to easily ensure that the resource is closed even on a thrown exception
-                        // Since this is running in a separate thread from the main handler, exceptions do not affect it
-                        //     so no extra try blocks are necessary
-                        using (sock) {
-                            // Check if the connection is closed to reduce unnecessary processing
-                            if (!sock.Connected)
-                                return;
+            for (; !ShuttingDown; ) {
+                try {
+                    Socket sock = Listener.AcceptSocket();
+                    // Sleep until a thread is freed up if at max capacity
+                    for (; numThreads == MaxThreads; Thread.Sleep(ConnectionPollingInterval)) ;
+                    numThreads++;
+                    // Spawn a thread to handle the connection so that clients can be handled in parallel
+                    new Task(delegate() {
+                        try {
+                            ConnectionHandler(sock);
+                        }
+                        finally {
+                            // Reduce current thread count no matter how the thread exits
+                            numThreads--;
+                        }
+                    }).Start();
+                }
+                catch (Exception) {
+                }
+            }
+        }
 
-                            byte[] byteBuffer = new byte[2048];
-                            sock.Receive(byteBuffer, byteBuffer.Length, 0);
+        private void ConnectionHandler(Socket sock) {
+            // Using block to easily ensure that the resource is closed even on a thrown exception
+            // Since this is running in a separate thread from the main handler, exceptions do not affect it
+            //     so no extra try blocks are necessary
+            using (sock) {
+                // Check if the connection is closed to reduce unnecessary processing
+                if (!sock.Connected)
+                    return;
 
-                            string strBuffer = Encoding.ASCII.GetString(byteBuffer);
+                byte[] byteBuffer = new byte[2048];
+                sock.Receive(byteBuffer, byteBuffer.Length, 0);
 
-                            string httpVersion = strBuffer.Substring(strBuffer.IndexOf("HTTP"), 8);
+                string strBuffer = Encoding.ASCII.GetString(byteBuffer);
 
-                            // Find the requested file
-                            strBuffer = strBuffer.Replace("\\", "/");
-                            string fileName = strBuffer.Substring(0, strBuffer.IndexOf(" HTTP"));
-                            fileName = fileName.Substring(fileName.LastIndexOf("/") + 1);
-                            // HTML args processing can be added here if the program were to be augmented
-                            // Would need to parse a little more to split fileName to exclude the args
-                            // Chained if-else statements to allow specific protocol handling and sends the error page if the page does not exist
-                            // As it is now, I load each page and cache it in memory
-                            // If we had an emphasis on memory over speed, we could dynamically load and serve the pages here without caching
+                string httpVersion = strBuffer.Substring(strBuffer.IndexOf("HTTP"), 8);
 
-                            // Example of special case addition
-                            if (fileName.Equals("")) {
-                                SendMessage(httpVersion, WebFileMap["Main.html"].Mime, WebFileMap["Main.html"].Body, sock);
-                            }
-                            // Serve all other pages that are available
-                            else if (WebFileMap.ContainsKey(fileName)) {
-                                SendMessage(httpVersion, WebFileMap[fileName].Mime, WebFileMap[fileName].Body, sock);
-                            }
-                            // If the page does not exist, send a 404 page
-                            else {
-                                SendMessage(httpVersion, "text/html", "<h1>404 File Not Found<h1>", sock, "404 Not Found");
-                            }
+                // Find the requested file
+                strBuffer = strBuffer.Replace("\\", "/");
+                string fileName = strBuffer.Substring(0, strBuffer.IndexOf(" HTTP"));
+                fileName = fileName.Substring(fileName.LastIndexOf("/") + 1);
+                Dictionary<string, string> htmlArgs = new Dictionary<string, string>();
+                if (fileName.IndexOf('?') > -1) {
+                    foreach (string arg in fileName.Substring(fileName.IndexOf('?') + 1).Split('&')) {
+                        string[] arg2 = arg.Split('=');
+                        if (arg2.Length == 2) {
+                            htmlArgs[arg2[0]] = arg2[1];
                         }
                     }
-                    finally {
-                        // Reduce current thread count no matter how the thread exits
-                        numThreads--;
-                    }
-                }).Start();
+                    fileName = fileName.Substring(0, fileName.IndexOf('?'));
+                }
+
+                // Chained if-else statements to allow specific protocol handling and sends the error page if the page does not exist
+                // HTML arguments are stored as key, value pairs in htmlArgs
+                // As it is now, I load each page and cache it in memory
+                // If we had an emphasis on memory over speed, we could dynamically load and serve the pages here without caching
+
+                // Example of special case addition
+                if (fileName.Equals("")) {
+                    SendMessage(httpVersion, WebFileMap["Main.html"].Mime, WebFileMap["Main.html"].Body, sock);
+                }
+                // Serve all other pages that are available
+                else if (WebFileMap.ContainsKey(fileName)) {
+                    SendMessage(httpVersion, WebFileMap[fileName].Mime, WebFileMap[fileName].Body, sock);
+                }
+                // If the page does not exist, send a 404 page
+                else {
+                    SendMessage(httpVersion, "text/html", "<h1>404 File Not Found<h1>", sock, "404 Not Found");
+                }
             }
         }
 
         private void SendMessage(string httpVersion, string messageType, string message, Socket sock, string messageStatus = "200 OK") {
             // Build the HTTP header and append the message
-            String strBuffer = "";
-            strBuffer += httpVersion + " " + messageStatus + "\r\n";
-            strBuffer += "Server: cx1193719-b\r\n";
-            strBuffer += "Content-Type: " + messageType + "\r\n";
-            strBuffer += "Accept-Ranges: bytes\r\n";
-            strBuffer += "Content-Length: " + message.Length + "\r\n\r\n";
-            strBuffer += message;
+            StringBuilder strBuilder = new StringBuilder();
+            strBuilder.Append(httpVersion)
+                .Append(" ")
+                .Append(messageStatus)
+                .Append("\r\n")
+                .Append("Server: cx1193719-b\r\n")
+                .Append("Content-Type: ")
+                .Append(messageType)
+                .Append("\r\n")
+                .Append("Accept-Ranges: bytes\r\n")
+                .Append("Content-Length: ")
+                .Append(message.Length)
+                .Append("\r\n\r\n")
+                .Append(message);
+            String strBuffer = strBuilder.ToString();
 
             byte[] byteBuffer = Encoding.ASCII.GetBytes(strBuffer); 
             
