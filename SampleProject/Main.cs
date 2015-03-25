@@ -17,14 +17,15 @@ namespace SampleProject {
             new string[] { "Style.css", "text/css" }
         };
 
+        private const int MaxThreads = 4;
+        private const int ConnectionPollingInterval = 4;
+
         // Could just use Tuple, but creating an immutable FileData class is more OOP convention
         private static readonly Dictionary<string, FileData> WebFileMap = new Dictionary<string, FileData>();
 
         private int Port;
         private TcpListener Listener;
         private string RootFilePath;
-
-        private static bool shuttingDown = false;
 
         public static int Main(string[] argv) {
             // So I won't be looked at funny for having "static" all over the place
@@ -82,7 +83,7 @@ namespace SampleProject {
             Console.WriteLine("Starting server");
             // Start the listener
             Listener.Start();
-            // Start the handler thread
+            // Start the root handler thread
             new Task(ConnectionHandler).Start();
 
             Console.WriteLine();
@@ -91,27 +92,29 @@ namespace SampleProject {
             Console.WriteLine("Press enter to end the server");
             Console.ReadLine();
 
-            // Set the global shut down var
-            shuttingDown = true;
             Listener.Stop();
 
             return 0;
         }
 
         private void ConnectionHandler() {
-            Socket sock;
-            // The global shutdown var is really kind of moot since TCPListener.AcceptSocket() is blocking and throws an exception when the TCPListener is closed
-            // I could just have an infinite loop and break out on exception, but then I'd have to make sure it's the right exception thrown for the right reason
-            // It throws System.Net.Sockets.SocketException
-            // Seems pretty general, so to be on the safe side I have this shutdown var
-            for (; !shuttingDown; ) {
-                // Try-catch so that for whatever exception that gets thrown, the program continus trying to accept other connections
-                try {
-                    // Using block to make sure that the resource is closed even on a thrown exception
-                    using (sock = Listener.AcceptSocket()) {
-                        // Probably extraneous check, but just in case the connection was closed
-                        // I don't think it would have any local detriments even if sending to a closed connection
-                        if (sock.Connected) {
+            int numThreads = 0;
+            for (; ; ) {
+                Socket sock = Listener.AcceptSocket();
+                // Sleep until a thread is freed up if at max capacity
+                for (; numThreads == MaxThreads; Thread.Sleep(ConnectionPollingInterval)) ;
+                // Spawn a thread to handle the connection so that clients can be handled in parallel
+                numThreads++;
+                new Task(delegate() {
+                    try {
+                        // Using block to easily ensure that the resource is closed even on a thrown exception
+                        // Since this is running in a separate thread from the main handler, exceptions do not affect it
+                        //     so no extra try blocks are necessary
+                        using (sock) {
+                            // Check if the connection is closed to reduce unnecessary processing
+                            if (!sock.Connected)
+                                return;
+
                             byte[] byteBuffer = new byte[2048];
                             sock.Receive(byteBuffer, byteBuffer.Length, 0);
 
@@ -143,10 +146,11 @@ namespace SampleProject {
                             }
                         }
                     }
-                }
-                catch (Exception e) {
-                    Console.WriteLine(e.GetBaseException().ToString() + " in ConnectionHandler()");
-                }
+                    finally {
+                        // Reduce current thread count no matter how the thread exits
+                        numThreads--;
+                    }
+                }).Start();
             }
         }
 
