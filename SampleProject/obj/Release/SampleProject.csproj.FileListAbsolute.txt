@@ -1,0 +1,5 @@
+C:\Omar Khan\C#\SampleWebServer\SampleProject\bin\Release\SampleProject.exe.config
+C:\Omar Khan\C#\SampleWebServer\SampleProject\bin\Release\SampleProject.exe
+C:\Omar Khan\C#\SampleWebServer\SampleProject\bin\Release\SampleProject.pdb
+C:\Omar Khan\C#\SampleWebServer\SampleProject\obj\Release\SampleProject.exe
+C:\Omar Khan\C#\SampleWebServer\SampleProject\obj\Release\SampleProject.pdb
